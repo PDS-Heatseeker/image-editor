@@ -1,7 +1,8 @@
 name: New release
 
 # Actions tab -> "New release" -> Run workflow.
-# Picks the next version from the latest vX.Y.Z tag, builds the exe and publishes the release.
+# Picks the next version from the latest vX.Y.Z tag, builds the exe and publishes the release,
+# with release notes listing the commits since the previous release.
 # Installed copies of the app update themselves the next time they start.
 on:
   workflow_dispatch:
@@ -14,14 +15,6 @@ on:
           - minor
           - major
         default: patch
-      notes:
-        description: "What's new (optional; a list of changes since the last release is added automatically)"
-        type: string
-        required: false
-      dry_run:
-        description: "Dry run: show the version and build the exe, but don't publish"
-        type: boolean
-        default: false
 
 permissions:
   contents: write
@@ -36,6 +29,7 @@ jobs:
     outputs:
       version: ${{ steps.next.outputs.version }}
       tag: ${{ steps.next.outputs.tag }}
+      notes: ${{ steps.notes.outputs.notes }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -67,12 +61,40 @@ jobs:
           fi
           echo "version=$new" >> "$GITHUB_OUTPUT"
           echo "tag=v$new" >> "$GITHUB_OUTPUT"
+          echo "previous=${latest:+v$latest}" >> "$GITHUB_OUTPUT"
           {
             echo "### Next release: v$new"
             echo "- Previous: $from"
             echo "- Bump: $BUMP"
           } >> "$GITHUB_STEP_SUMMARY"
           echo "Next release: v$new (previous: $from, bump: $BUMP)"
+
+      - name: Write the release notes from the commits
+        id: notes
+        env:
+          PREV: ${{ steps.next.outputs.previous }}
+          TAG: ${{ steps.next.outputs.tag }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          range="${PREV:+$PREV..}HEAD"
+          {
+            echo "## What's changed"
+            echo
+            changes=$(git log "$range" --no-merges --reverse --format='- %s (%h)')
+            if [ -n "$changes" ]; then echo "$changes"; else echo "- Rebuild with no code changes"; fi
+            echo
+            if [ -n "$PREV" ]; then
+              echo "**Full changelog:** https://github.com/$REPO/compare/$PREV...$TAG"
+            else
+              echo "**Full history:** https://github.com/$REPO/commits/$TAG"
+            fi
+            echo
+            echo "Download **ImageShrinker.exe** below (Windows 10/11, 64-bit). Copies of the app that are already installed update themselves the next time they start."
+          } > notes.md
+          cat notes.md >> "$GITHUB_STEP_SUMMARY"
+          delim="NOTES_$(openssl rand -hex 8)"
+          { echo "notes<<$delim"; cat notes.md; echo "$delim"; } >> "$GITHUB_OUTPUT"
 
   build:
     needs: version
@@ -82,7 +104,6 @@ jobs:
 
   publish:
     needs: [version, build]
-    if: ${{ !inputs.dry_run }}
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/download-artifact@v4
@@ -96,14 +117,14 @@ jobs:
           REPO: ${{ github.repository }}
           TAG: ${{ needs.version.outputs.tag }}
           V: ${{ needs.version.outputs.version }}
-          NOTES: ${{ inputs.notes }}
+          NOTES: ${{ needs.version.outputs.notes }}
         run: |
           set -euo pipefail
+          printf '%s\n' "$NOTES" > notes.md
           gh release create "$TAG" \
             out/ImageShrinker.exe "out/ImageShrinker-$V.zip" out/SHA256SUMS.txt \
             --repo "$REPO" \
             --target "$GITHUB_SHA" \
             --title "Image Shrinker $V" \
-            --notes "$NOTES" \
-            --generate-notes
+            --notes-file notes.md
           echo "Published https://github.com/$REPO/releases/tag/$TAG" | tee -a "$GITHUB_STEP_SUMMARY"

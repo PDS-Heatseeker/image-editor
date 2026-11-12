@@ -40,9 +40,7 @@ When the app starts it checks this repository's latest release. If there's a new
    - **minor** — new features: `1.3.0 → 1.4.0`
    - **major** — big changes: `1.3.0 → 2.0.0`
 
-   Optionally type a few words for *What's new*; a list of the changes since the last release is added automatically. Tick *Dry run* to see the next version number and test the build without publishing anything.
-
-The workflow finds the latest `vX.Y.Z` tag, works out the next version, builds `ImageShrinker.exe` with that version number and publishes the release with the exe attached (about 2 minutes). The very first run uses the version already in the code (`APP_VERSION` in `src/gui.c`) instead of bumping.
+The workflow finds the latest `vX.Y.Z` tag, works out the next version, builds `ImageShrinker.exe` with that version number and publishes the release with the exe attached (about 2 minutes). The release notes list every commit since the previous release, so write clear commit messages. The very first run uses the version already in the code (`APP_VERSION` in `src/gui.c`) instead of bumping.
 
 Every installed copy picks up the new release the next time it starts.
 
