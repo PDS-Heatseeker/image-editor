@@ -41,7 +41,7 @@
 
 #define MAX_PIXELS 300000000LL   /* refuse anything that would need > ~1 GB decoded */
 
-enum { SRC_JPEG, SRC_WEBP, SRC_PNG, SRC_BMP, SRC_GIF, SRC_OTHER };
+enum { SRC_JPEG, SRC_WEBP, SRC_PNG, SRC_BMP, SRC_GIF, SRC_TIFF, SRC_OTHER };
 
 typedef struct {
     unsigned char *px;
@@ -335,6 +335,100 @@ static int decode_other(const unsigned char *in, size_t n, Image *im, char *err,
     return 1;
 }
 
+/* ---------- TIFF decode (8-bit chunky gray/RGB/RGBA, none or deflate, as this app writes) ---------- */
+
+static unsigned tget(const unsigned char *d, size_t n, size_t off, int sz)
+{
+    if (off + (size_t)sz > n) return 0;
+    return sz == 2 ? (unsigned)(d[off] | (d[off + 1] << 8))
+                   : (unsigned)(d[off] | (d[off + 1] << 8) | (d[off + 2] << 16) | ((unsigned)d[off + 3] << 24));
+}
+
+/* value i of a SHORT/LONG tag (inline or via offset) */
+static unsigned tval(const unsigned char *d, size_t n, size_t e, unsigned i)
+{
+    unsigned type = tget(d, n, e + 2, 2), cnt = tget(d, n, e + 4, 4);
+    int sz = type == 3 ? 2 : 4;
+    size_t base = (size_t)cnt * sz <= 4 ? e + 8 : tget(d, n, e + 8, 4);
+    if (i >= cnt) return 0;
+    return tget(d, n, base + (size_t)i * sz, sz);
+}
+
+static int decode_tiff(const unsigned char *d, size_t n, Image *im, char *err, size_t errn)
+{
+    size_t ifd = tget(d, n, 4, 4), e, rowb, need, got = 0;
+    unsigned cnt, i, w = 0, h = 0, comp = 1, spp = 1, bps = 8, pred = 1, photo = 2;
+    size_t soff_e = 0, scnt_e = 0;
+    unsigned nstrips = 0, s, x, y, c;
+    unsigned char *raw;
+    if (ifd + 2 > n) { seterr(err, errn, "damaged TIFF"); return 0; }
+    cnt = tget(d, n, ifd, 2);
+    for (i = 0; i < cnt; i++) {
+        e = ifd + 2 + (size_t)i * 12;
+        switch (tget(d, n, e, 2)) {
+        case 256: w = tval(d, n, e, 0); break;
+        case 257: h = tval(d, n, e, 0); break;
+        case 258: bps = tval(d, n, e, 0); break;
+        case 259: comp = tval(d, n, e, 0); break;
+        case 262: photo = tval(d, n, e, 0); break;
+        case 273: soff_e = e; nstrips = tget(d, n, e + 4, 4); break;
+        case 277: spp = tval(d, n, e, 0); break;
+        case 279: scnt_e = e; break;
+        case 317: pred = tval(d, n, e, 0); break;
+        }
+    }
+    if (!w || !h || bps != 8 || (spp != 1 && spp != 3 && spp != 4) || (photo != 1 && photo != 2) ||
+        (comp != 1 && comp != 8 && comp != 32946) || !soff_e || !scnt_e || !nstrips) {
+        seterr(err, errn, "unsupported TIFF");
+        return 0;
+    }
+    if ((long long)w * h > MAX_PIXELS) { seterr(err, errn, "image is too large"); return 0; }
+    rowb = (size_t)w * spp;
+    need = rowb * h;
+    raw = (unsigned char *)malloc(need);
+    if (!raw) { seterr(err, errn, "not enough memory"); return 0; }
+    for (s = 0; s < nstrips && got < need; s++) {
+        size_t off = tval(d, n, soff_e, s), len = tval(d, n, scnt_e, s);
+        if (off > n || len > n - off) break;
+        if (comp == 1) {
+            size_t k = len < need - got ? len : need - got;
+            memcpy(raw + got, d + off, k);
+            got += k;
+        } else {
+            unsigned char *z = NULL;
+            size_t zn = 0;
+            if (lodepng_zlib_decompress(&z, &zn, d + off, len, &lodepng_default_decompress_settings)) { free(z); break; }
+            if (zn > need - got) zn = need - got;
+            memcpy(raw + got, z, zn);
+            got += zn;
+            free(z);
+        }
+    }
+    if (got < need) { free(raw); seterr(err, errn, "damaged TIFF"); return 0; }
+    if (pred == 2)
+        for (y = 0; y < h; y++) {
+            unsigned char *r = raw + (size_t)y * rowb;
+            for (x = 1; x < w; x++)
+                for (c = 0; c < spp; c++) r[x * spp + c] = (unsigned char)(r[x * spp + c] + r[(x - 1) * spp + c]);
+        }
+    im->comp = spp == 4 ? 4 : 3;
+    if (spp == 1) {
+        size_t k, np = (size_t)w * h;
+        unsigned char *rgb = (unsigned char *)malloc(np * 3);
+        if (!rgb) { free(raw); seterr(err, errn, "not enough memory"); return 0; }
+        for (k = 0; k < np; k++) rgb[k * 3] = rgb[k * 3 + 1] = rgb[k * 3 + 2] = photo == 0 ? (unsigned char)(255 - raw[k]) : raw[k];
+        free(raw);
+        raw = rgb;
+        im->gray = 1;
+    }
+    im->px = raw;
+    im->w = im->full_w = (int)w;
+    im->h = im->full_h = (int)h;
+    im->orient = 1;
+    im->src = SRC_TIFF;
+    return 1;
+}
+
 /* ---------- encoders ---------- */
 
 static int encode_jpeg(const Image *im, int quality, unsigned char **out, size_t *outn,
@@ -616,6 +710,8 @@ static int prepare(const unsigned char *in, size_t n, const IsOptions *opt, Imag
         ok = decode_jpeg(in, n, opt, im, err, errn);
     else if (n >= 12 && memcmp(in, "RIFF", 4) == 0 && memcmp(in + 8, "WEBP", 4) == 0)
         ok = decode_webp(in, n, im, err, errn);
+    else if (n >= 8 && memcmp(in, "II*\0", 4) == 0)
+        ok = decode_tiff(in, n, im, err, errn);
     else
         ok = decode_other(in, n, im, err, errn);
     if (!ok) return 0;
@@ -670,6 +766,7 @@ static int resolve_format(int src, int src_lossless, int fmt)
     return src == SRC_JPEG ? IS_FMT_JPEG
          : src == SRC_WEBP ? (src_lossless ? IS_FMT_WEBP_LOSSLESS : IS_FMT_WEBP)
          : src == SRC_BMP  ? IS_FMT_BMP
+         : src == SRC_TIFF ? IS_FMT_TIFF
          : IS_FMT_PNG;                          /* PNG, and GIF (first frame) */
 }
 
@@ -962,4 +1059,44 @@ void is_sample_free(IsSample *s)
     free(s->tiny.px);
     free(s->icc);
     free(s);
+}
+
+/* ---------- preview ---------- */
+
+int is_preview_decode(const unsigned char *in, size_t n, int w, int h, int stretch,
+                      unsigned char **bgra, int *ow, int *oh, char *err, size_t errn)
+{
+    Image im;
+    PrepInfo pi;
+    IsOptions o;
+    size_t i, np;
+    unsigned char *d;
+    int x, y;
+
+    memset(&o, 0, sizeof o);
+    o.max_w = w; o.max_h = h; o.stretch = stretch;
+    *bgra = NULL;
+    if (err && errn) err[0] = 0;
+    if (!prepare(in, n, &o, &im, &pi, err, errn)) return 0;
+    np = (size_t)im.w * im.h;
+    d = (unsigned char *)malloc(np * 4);
+    if (!d) { free(im.px); free(im.icc); seterr(err, errn, "not enough memory"); return 0; }
+    for (y = 0, i = 0; y < im.h; y++)
+        for (x = 0; x < im.w; x++, i++) {
+            const unsigned char *s = im.px + i * im.comp;
+            unsigned char *t = d + i * 4;
+            if (im.comp == 4 && s[3] != 255) {    /* transparency shown over a checkerboard */
+                int bg = (((x >> 3) + (y >> 3)) & 1) ? 204 : 255, a = s[3];
+                t[2] = (unsigned char)((s[0] * a + bg * (255 - a) + 127) / 255);
+                t[1] = (unsigned char)((s[1] * a + bg * (255 - a) + 127) / 255);
+                t[0] = (unsigned char)((s[2] * a + bg * (255 - a) + 127) / 255);
+            } else {
+                t[2] = s[0]; t[1] = s[1]; t[0] = s[2];
+            }
+            t[3] = 255;
+        }
+    *bgra = d; *ow = im.w; *oh = im.h;
+    free(im.px);
+    free(im.icc);
+    return 1;
 }

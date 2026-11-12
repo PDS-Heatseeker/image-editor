@@ -49,4 +49,10 @@ void   is_sample_info(const IsSample *s, int *src_w, int *src_h, int *out_w, int
 size_t is_sample_mem(const IsSample *s);
 void   is_sample_free(IsSample *s);
 
+/* Decode any supported file (including this app's TIFF output) for display:
+ * fitted inside w x h (0 = no limit), or exactly w x h if stretch. Returns 32-bit BGRA, top-down,
+ * transparency drawn over a checkerboard. free() the pixels. */
+int    is_preview_decode(const unsigned char *in, size_t n, int w, int h, int stretch,
+                         unsigned char **bgra, int *ow, int *oh, char *err, size_t errn);
+
 #endif
