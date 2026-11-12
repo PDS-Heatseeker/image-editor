@@ -1,0 +1,109 @@
+name: New release
+
+# Actions tab -> "New release" -> Run workflow.
+# Picks the next version from the latest vX.Y.Z tag, builds the exe and publishes the release.
+# Installed copies of the app update themselves the next time they start.
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: "Version bump (major 1.3.0 -> 2.0.0, minor -> 1.4.0, patch -> 1.3.1)"
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+        default: patch
+      notes:
+        description: "What's new (optional; a list of changes since the last release is added automatically)"
+        type: string
+        required: false
+      dry_run:
+        description: "Dry run: show the version and build the exe, but don't publish"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: new-release
+  cancel-in-progress: false
+
+jobs:
+  version:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.next.outputs.version }}
+      tag: ${{ steps.next.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Work out the next version
+        id: next
+        env:
+          BUMP: ${{ inputs.bump }}
+        run: |
+          set -euo pipefail
+          latest=$(git tag -l 'v*' | sed 's/^v//' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n 1 || true)
+          if [ -z "$latest" ]; then
+            # first release: use the version already in the code instead of bumping from 0.0.0
+            new=$(grep -oE '#define APP_VERSION "[0-9]+\.[0-9]+\.[0-9]+"' src/gui.c | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
+            from="no earlier release (version taken from src/gui.c)"
+          else
+            IFS=. read -r MA MI PA <<< "$latest"
+            case "$BUMP" in
+              major) new="$((MA + 1)).0.0" ;;
+              minor) new="$MA.$((MI + 1)).0" ;;
+              *)     new="$MA.$MI.$((PA + 1))" ;;
+            esac
+            from="v$latest"
+          fi
+          if git rev-parse -q --verify "refs/tags/v$new" >/dev/null; then
+            echo "::error::Tag v$new already exists"; exit 1
+          fi
+          echo "version=$new" >> "$GITHUB_OUTPUT"
+          echo "tag=v$new" >> "$GITHUB_OUTPUT"
+          {
+            echo "### Next release: v$new"
+            echo "- Previous: $from"
+            echo "- Bump: $BUMP"
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "Next release: v$new (previous: $from, bump: $BUMP)"
+
+  build:
+    needs: version
+    uses: ./.github/workflows/build.yml
+    with:
+      version: ${{ needs.version.outputs.version }}
+
+  publish:
+    needs: [version, build]
+    if: ${{ !inputs.dry_run }}
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: ImageShrinker-${{ needs.version.outputs.version }}
+          path: out
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ needs.version.outputs.tag }}
+          V: ${{ needs.version.outputs.version }}
+          NOTES: ${{ inputs.notes }}
+        run: |
+          set -euo pipefail
+          gh release create "$TAG" \
+            out/ImageShrinker.exe "out/ImageShrinker-$V.zip" out/SHA256SUMS.txt \
+            --repo "$REPO" \
+            --target "$GITHUB_SHA" \
+            --title "Image Shrinker $V" \
+            --notes "$NOTES" \
+            --generate-notes
+          echo "Published https://github.com/$REPO/releases/tag/$TAG" | tee -a "$GITHUB_STEP_SUMMARY"

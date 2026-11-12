@@ -1,0 +1,46 @@
+name: Build
+
+# Reusable: builds ImageShrinker.exe for a given version and stores it as an artifact.
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: "Version number to build in, e.g. 1.4.0"
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install the Zig C compiler
+        run: pip install ziglang==0.17.1
+
+      - name: Download libraries
+        run: scripts/fetch_deps.sh
+
+      - name: Build
+        run: scripts/build.sh "${{ inputs.version }}"
+
+      - name: Package
+        env:
+          V: ${{ inputs.version }}
+        run: |
+          cd out
+          zip -9 "ImageShrinker-$V.zip" ImageShrinker.exe
+          sha256sum ImageShrinker.exe "ImageShrinker-$V.zip" | tee SHA256SUMS.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ImageShrinker-${{ inputs.version }}
+          path: out/
+          if-no-files-found: error

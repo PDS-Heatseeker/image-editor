@@ -34,10 +34,19 @@ When the app starts it checks this repository's latest release. If there's a new
 ### Publishing a new version
 
 1. Push your changes to `main`.
-2. On GitHub go to **Releases → Draft a new release**, create a tag such as **`v1.3.0`** (it must be higher than the current version), add notes, and click **Publish release**.
-3. The *Build and release* workflow builds `ImageShrinker.exe` with that version number and attaches it to the release (about 2 minutes, see the **Actions** tab).
+2. Open the **Actions** tab → **New release** → **Run workflow**.
+3. Pick the bump and click **Run workflow**:
+   - **patch** — small fixes: `1.3.0 → 1.3.1`
+   - **minor** — new features: `1.3.0 → 1.4.0`
+   - **major** — big changes: `1.3.0 → 2.0.0`
 
-Every installed copy picks it up the next time it starts.
+   Optionally type a few words for *What's new*; a list of the changes since the last release is added automatically. Tick *Dry run* to see the next version number and test the build without publishing anything.
+
+The workflow finds the latest `vX.Y.Z` tag, works out the next version, builds `ImageShrinker.exe` with that version number and publishes the release with the exe attached (about 2 minutes). The very first run uses the version already in the code (`APP_VERSION` in `src/gui.c`) instead of bumping.
+
+Every installed copy picks up the new release the next time it starts.
+
+You can still publish a release by hand on the **Releases** page (tag like `v1.4.0`); the *Build and release* workflow then builds the exe and attaches it.
 
 ## Building it yourself
 
