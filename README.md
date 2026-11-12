@@ -21,7 +21,7 @@ The app isn't code-signed, so the first time Windows shows *"Windows protected y
 - **Format**: keep each image's own format, or convert all to JPG, JPEG, PNG, WebP, WebP lossless, TIFF or BMP. The quality slider (default 90) applies to JPG and WebP.
 - **Step 1 · Resize and compress**: makes the new versions without saving anything yet. Change the settings and run it again as often as you like. Each run starts from your **original** files, never from an earlier result.
 - **Preview**: double-click an image (or select it and click *Preview*). Once it's compressed you get a before/after view: drag the line to compare, scroll to zoom, and use ‹ › to step through the selected images.
-- **Step 2 · Save**: appears after compressing. Save **to a folder** (default) or **as a zip file**. Existing files are never overwritten; a name that's already taken gets " (2)" added.
+- **Step 2 · Save**: appears after compressing. Save **to a folder** (default) or **as a zip file**. If files with the same names are already in the folder (for example when saving back where the images came from), it asks whether to **replace** them, **keep both** (adds " (2)") or **skip** them, and warns you if any of them are your originals.
 - Photos are rotated upright, camera metadata is removed, wide-gamut colour profiles are kept, and re-saving never makes an image larger.
 - **Light on resources**: one image in memory at a time, low-priority background threads, and results kept in a temporary folder that's removed when you close the app.
 

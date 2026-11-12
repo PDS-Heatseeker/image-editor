@@ -142,7 +142,7 @@ static volatile LONG g_cancel, g_quit;
 static HANDLE g_thread;
 static wchar_t g_update_ver[64];
 static wchar_t g_tmpdir[MAX_PATH];
-static int g_auto_ok, g_auto_failed;
+static int g_auto_ok, g_auto_failed, g_auto_conflict;   /* 0 = keep both */
 static int g_update_ready;
 
 /* estimator */
@@ -755,10 +755,15 @@ typedef struct {
     IsOptions opt;
     wchar_t dest[1024];            /* save: folder or zip file */
     wchar_t tmpdir[MAX_PATH];
+    int conflict;                  /* folder save, name already taken: CONFLICT_* */
 } Job;
 
+#define CONFLICT_KEEP_BOTH 0       /* save as "name (2).ext" */
+#define CONFLICT_REPLACE   1       /* overwrite the existing file */
+#define CONFLICT_SKIP      2       /* leave the existing file, don't save this one */
+
 typedef struct {
-    int kind, ok, failed, cancelled, fatal;
+    int kind, ok, failed, cancelled, fatal, replaced, skipped;
     unsigned long long in_bytes, out_bytes;
     wchar_t fatalmsg[400];
     wchar_t errors[2400];
@@ -943,13 +948,32 @@ static DWORD WINAPI save_worker(LPVOID param)
             wcsncpy(stem, job->names[i], 399);
             stem[399] = 0;
             if (ext) stem[ext - job->names[i]] = 0; else ext = L"";
-            for (k = 1; k < 10000; k++) {
-                if (k == 1) swprintf(target, 1400, L"%ls\\%ls", job->dest, job->names[i]);
-                else swprintf(target, 1400, L"%ls\\%ls (%d)%ls", job->dest, stem, k, ext);
-                if (CopyFileW(job->files[i], target, TRUE)) break;
-                if (GetLastError() != ERROR_FILE_EXISTS && GetLastError() != ERROR_ALREADY_EXISTS) { k = 10000; break; }
+            swprintf(target, 1400, L"%ls\\%ls", job->dest, job->names[i]);
+            if (job->conflict != CONFLICT_KEEP_BOTH && GetFileAttributesW(target) != INVALID_FILE_ATTRIBUTES) {
+                if (job->conflict == CONFLICT_SKIP) { res->skipped++; continue; }
+                /* replace: write next to it first, then swap, so a failure never leaves a half-written file */
+                {
+                    wchar_t tmp[1450];
+                    swprintf(tmp, 1450, L"%ls.imageshrinker-tmp", target);
+                    if (!CopyFileW(job->files[i], tmp, FALSE) ||
+                        !MoveFileExW(tmp, target, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+                        DWORD e = GetLastError();
+                        DeleteFileW(tmp);
+                        note_error(res, job->names[i], e == ERROR_ACCESS_DENIED ? L"the existing file is read-only or in use"
+                                                                               : L"could not replace the existing file");
+                        continue;
+                    }
+                    res->replaced++;
+                }
+            } else {
+                for (k = 1; k < 10000; k++) {
+                    if (k == 1) swprintf(target, 1400, L"%ls\\%ls", job->dest, job->names[i]);
+                    else swprintf(target, 1400, L"%ls\\%ls (%d)%ls", job->dest, stem, k, ext);
+                    if (CopyFileW(job->files[i], target, TRUE)) break;
+                    if (GetLastError() != ERROR_FILE_EXISTS && GetLastError() != ERROR_ALREADY_EXISTS) { k = 10000; break; }
+                }
+                if (k >= 10000) { note_error(res, job->names[i], L"could not write the file"); continue; }
             }
-            if (k >= 10000) { note_error(res, job->names[i], L"could not write the file"); continue; }
             res->ok++;
             if (GetFileAttributesExW(target, GetFileExInfoStandard, &fa))
                 res->out_bytes += ((unsigned long long)fa.nFileSizeHigh << 32) | fa.nFileSizeLow;
@@ -1225,6 +1249,74 @@ static int pick_folder(wchar_t *out, int outn, const wchar_t *start)
     }
 }
 
+static int *g_repl_ids, g_nrepl;      /* images whose original file a save may replace */
+
+typedef HRESULT (WINAPI *TaskDialogIndirectFn)(const TASKDIALOGCONFIG *, int *, int *, BOOL *);
+
+/* Asks what to do when files with the same names are already in the folder.
+ * Returns CONFLICT_* or -1 to cancel. */
+static int ask_conflict(int nconf, int norig, const wchar_t *dest)
+{
+    wchar_t head[200], body[600];
+    const wchar_t *folder = wcsrchr(dest, L'\\');
+    HMODULE cc = GetModuleHandleW(L"comctl32.dll");
+    TaskDialogIndirectFn tdi = cc ? (TaskDialogIndirectFn)(void *)GetProcAddress(cc, "TaskDialogIndirect") : NULL;
+    folder = folder && folder[1] ? folder + 1 : dest;
+    if (nconf == 1) swprintf(head, 200, L"A file with the same name is already in \x201C%.80ls\x201D", folder);
+    else swprintf(head, 200, L"%d files with the same names are already in \x201C%.80ls\x201D", nconf, folder);
+    if (norig == nconf)
+        swprintf(body, 600, norig == 1 ? L"It\x2019s the original image you added. Replacing it can\x2019t be undone."
+                                       : L"They\x2019re the original images you added. Replacing them can\x2019t be undone.");
+    else if (norig > 0)
+        swprintf(body, 600, L"%d of them %ls the original image%ls you added. Replacing can\x2019t be undone.",
+                 norig, norig == 1 ? L"is" : L"are", norig == 1 ? L"" : L"s");
+    else
+        wcscpy(body, L"Replacing overwrites the files that are there now.");
+
+    if (tdi) {
+        TASKDIALOGCONFIG c;
+        TASKDIALOG_BUTTON b[3];
+        int pressed = 0;
+        b[0].nButtonID = 100 + CONFLICT_REPLACE;
+        b[0].pszButtonText = nconf == 1 ? L"Replace the file\nOverwrite it with the new version."
+                                        : L"Replace the files\nOverwrite them with the new versions.";
+        b[1].nButtonID = 100 + CONFLICT_KEEP_BOTH;
+        b[1].pszButtonText = L"Keep both\nSave the new versions with \u201C(2)\u201D added to the name.";
+        b[2].nButtonID = 100 + CONFLICT_SKIP;
+        b[2].pszButtonText = nconf == 1 ? L"Skip this file\nOnly save the images that aren\x2019t already there."
+                                        : L"Skip these files\nOnly save the images that aren\x2019t already there.";
+        memset(&c, 0, sizeof c);
+        c.cbSize = sizeof c;
+        c.hwndParent = g_wnd;
+        c.hInstance = g_inst;
+        c.dwFlags = TDF_USE_COMMAND_LINKS | TDF_ALLOW_DIALOG_CANCELLATION | TDF_POSITION_RELATIVE_TO_WINDOW;
+        c.dwCommonButtons = TDCBF_CANCEL_BUTTON;
+        c.pszWindowTitle = APP_NAME;
+        c.pszMainIcon = norig > 0 ? TD_WARNING_ICON : NULL;
+        c.pszMainInstruction = head;
+        c.pszContent = body;
+        c.cButtons = 3;
+        c.pButtons = b;
+        c.nDefaultButton = 100 + CONFLICT_KEEP_BOTH;   /* Enter never overwrites by accident */
+        if (SUCCEEDED(tdi(&c, &pressed, NULL, NULL)) && pressed >= 100 && pressed <= 102) return pressed - 100;
+        return -1;
+    } else {
+        wchar_t m[1000];
+        int r;
+        swprintf(m, 1000, L"%ls.\n%ls\n\nReplace %ls?\n\nYes = replace    No = keep both (adds \u201C(2)\u201D)    Cancel = don\x2019t save",
+                 head, body, nconf == 1 ? L"it" : L"them");
+        r = MessageBoxW(g_wnd, m, APP_NAME, MB_YESNOCANCEL | MB_DEFBUTTON2 | (norig ? MB_ICONWARNING : MB_ICONQUESTION));
+        return r == IDYES ? CONFLICT_REPLACE : r == IDNO ? CONFLICT_KEEP_BOTH : -1;
+    }
+}
+
+static int same_path(const wchar_t *a, const wchar_t *b)
+{
+    wchar_t fa[1400], fb[1400];
+    if (!GetFullPathNameW(a, 1400, fa, NULL) || !GetFullPathNameW(b, 1400, fb, NULL)) return _wcsicmp(a, b) == 0;
+    return _wcsicmp(fa, fb) == 0;
+}
+
 static void start_save(void)
 {
     Job *job;
@@ -1297,6 +1389,32 @@ static void start_save(void)
     job->kind = zip ? 2 : 1;
     job->hwnd = g_wnd;
     wcsncpy(job->dest, dest, 1023);
+
+    free(g_repl_ids);
+    g_repl_ids = NULL;
+    g_nrepl = 0;
+    if (!zip) {                                  /* names already taken in that folder? */
+        int nconf = 0, norig = 0;
+        g_repl_ids = (int *)malloc((size_t)(k ? k : 1) * sizeof *g_repl_ids);
+        for (i = 0; i < k; i++) {
+            wchar_t target[1400];
+            int fi;
+            swprintf(target, 1400, L"%ls\\%ls", dest, job->names[i]);
+            if (GetFileAttributesW(target) == INVALID_FILE_ATTRIBUTES) continue;
+            nconf++;
+            fi = find_item(job->ids[i]);
+            if (fi >= 0 && same_path(g_items[fi]->path, target)) {
+                norig++;
+                if (g_repl_ids) g_repl_ids[g_nrepl++] = job->ids[i];
+            }
+        }
+        if (nconf > 0) {
+            int c = g_auto ? g_auto_conflict : ask_conflict(nconf, norig, dest);
+            if (c < 0) { job_free(job); g_nrepl = 0; set_status(L"Not saved."); return; }
+            job->conflict = c;
+            if (c != CONFLICT_REPLACE) g_nrepl = 0;
+        }
+    }
     run_job(job, save_worker, L"Saving\x2026");
 }
 
@@ -1329,6 +1447,34 @@ static void check_auto_est(void)
     PostQuitMessage(0);
 }
 
+/* After replacing originals, those images now ARE the saved versions: re-read them so the list,
+ * estimates and any later compress start from what's on disk now. */
+static void refresh_replaced(void)
+{
+    int i;
+    for (i = 0; i < g_nrepl; i++) {
+        int idx = find_item(g_repl_ids[i]);
+        Item *it;
+        WIN32_FILE_ATTRIBUTE_DATA fa;
+        if (idx < 0) continue;
+        it = g_items[idx];
+        if (GetFileAttributesExW(it->path, GetFileExInfoStandard, &fa))
+            it->bytes = ((unsigned long long)fa.nFileSizeHigh << 32) | fa.nFileSizeLow;
+        if (it->out_path) { DeleteFileW(it->out_path); free(it->out_path); it->out_path = NULL; }
+        it->id = g_next_id++;                        /* forget cached estimates for the old file */
+        it->src_w = it->src_h = 0;
+        it->res_gen = 0;
+        it->res_actual = 0;
+    }
+    if (g_nrepl > 0) {
+        InvalidateRect(g_list, NULL, FALSE);
+        update_totals();
+        update_save_panel();
+        SetTimer(g_wnd, TIMER_EST, 150, NULL);
+    }
+    g_nrepl = 0;
+}
+
 static void job_done(JobResult *r)
 {
     wchar_t msg[4000], a[32], b[32];
@@ -1355,8 +1501,8 @@ static void job_done(JobResult *r)
             swprintf(logp, 1040, L"%ls.log", g_autozip);
             lf = _wfopen(logp, L"w");
             if (lf) {
-                if (r) fprintf(lf, "compressed=%d failed=%d saved=%d save_failed=%d fatal=%d out=%llu\n",
-                               g_auto_ok, g_auto_failed, r->ok, r->failed, r->fatal, r->out_bytes);
+                if (r) fprintf(lf, "compressed=%d failed=%d saved=%d save_failed=%d fatal=%d out=%llu replaced=%d skipped=%d\n",
+                               g_auto_ok, g_auto_failed, r->ok, r->failed, r->fatal, r->out_bytes, r->replaced, r->skipped);
                 else fprintf(lf, "compressed=%d failed=%d saved=0\n", g_auto_ok, g_auto_failed);
                 fclose(lf);
             }
@@ -1390,6 +1536,7 @@ static void job_done(JobResult *r)
             }
         }
     } else {
+        refresh_replaced();
         if (r->cancelled) {
             set_status(r->kind == 2 ? L"Cancelled. No zip was saved." : L"Cancelled. Some images may already be in the folder.");
         } else if (r->fatal) {
@@ -1401,6 +1548,15 @@ static void job_done(JobResult *r)
             swprintf(msg, 4000, L"Saved %d image%ls (%ls) to %ls", r->ok, r->ok == 1 ? L"" : L"s", b, r->dest);
             set_status(msg);
             swprintf(msg, 4000, L"Saved %d image%ls (%ls) to:\n%ls\n", r->ok, r->ok == 1 ? L"" : L"s", b, r->dest);
+            if (r->replaced) {
+                l = wcslen(msg);
+                swprintf(msg + l, 4000 - l, L"\n%d existing file%ls replaced.\n", r->replaced, r->replaced == 1 ? L" was" : L"s were");
+            }
+            if (r->skipped) {
+                l = wcslen(msg);
+                swprintf(msg + l, 4000 - l, L"\n%d image%ls skipped because %ls already there.\n", r->skipped,
+                         r->skipped == 1 ? L" was" : L"s were", r->skipped == 1 ? L"its name was" : L"their names were");
+            }
             if (r->fatalmsg[0]) { l = wcslen(msg); swprintf(msg + l, 4000 - l, L"\n%ls\n", r->fatalmsg); }
             if (r->failed) {
                 l = wcslen(msg);
@@ -2225,6 +2381,10 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show)
             else if (wcscmp(argv[i], L"--nolock") == 0) want_lock = 0;
             else if (wcscmp(argv[i], L"--select") == 0 && i + 1 < argc) want_sel = _wtoi(argv[++i]);
             else if (wcscmp(argv[i], L"--no-update") == 0) no_update = 1;
+            else if (wcscmp(argv[i], L"--on-conflict") == 0 && i + 1 < argc) {
+                i++;
+                g_auto_conflict = !wcscmp(argv[i], L"replace") ? CONFLICT_REPLACE : !wcscmp(argv[i], L"skip") ? CONFLICT_SKIP : CONFLICT_KEEP_BOTH;
+            }
             else if (wcscmp(argv[i], L"--uncheck") == 0 && i + 1 < argc) { int k = _wtoi(argv[++i]); if (k >= 0 && k < g_nitems) g_items[k]->checked = 0; }
             else if (wcscmp(argv[i], L"--preview") == 0 && i + 1 < argc) want_preview = _wtoi(argv[++i]);
             else if (wcscmp(argv[i], L"--update-url") == 0 && i + 1 < argc) wcsncpy(upd_url, argv[++i], 511);
