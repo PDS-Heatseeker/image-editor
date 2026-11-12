@@ -1,0 +1,71 @@
+name: Build and release
+
+# Publishing a release (tag like v1.3.0) builds ImageShrinker.exe and attaches it.
+# Installed copies of the app check the latest release when they start and update themselves.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to build, e.g. 1.3.0 (test build only, nothing is published)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install the Zig C compiler
+        run: pip install ziglang==0.17.1
+
+      - name: Work out the version number
+        id: v
+        env:
+          EVENT: ${{ github.event_name }}
+          TAG: ${{ github.event.release.tag_name }}
+          INPUT: ${{ inputs.version }}
+        run: |
+          if [ "$EVENT" = "release" ]; then V="$TAG"; else V="$INPUT"; fi
+          V="${V#v}"; V="${V#V}"
+          if ! [[ "$V" =~ ^[0-9]{1,4}\.[0-9]{1,4}\.[0-9]{1,4}$ ]]; then
+            echo "::error::The release tag must look like v1.3.0 (got '$V')"; exit 1
+          fi
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+
+      - name: Download libraries
+        run: scripts/fetch_deps.sh
+
+      - name: Build
+        run: scripts/build.sh "${{ steps.v.outputs.version }}"
+
+      - name: Package
+        env:
+          V: ${{ steps.v.outputs.version }}
+        run: |
+          cd out
+          zip -9 "ImageShrinker-$V.zip" ImageShrinker.exe
+          sha256sum ImageShrinker.exe "ImageShrinker-$V.zip" | tee SHA256SUMS.txt
+
+      - name: Attach to the release
+        if: github.event_name == 'release'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name }}
+          V: ${{ steps.v.outputs.version }}
+        run: gh release upload "$TAG" out/ImageShrinker.exe "out/ImageShrinker-$V.zip" out/SHA256SUMS.txt --clobber
+
+      - name: Keep the build (manual runs)
+        if: github.event_name != 'release'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ImageShrinker-${{ steps.v.outputs.version }}
+          path: out/

@@ -1,0 +1,24 @@
+1 ICON "@SRC@/app.ico"
+1 24 "@SRC@/app.manifest"
+1 VERSIONINFO
+FILEVERSION @VERSION_COMMAS@
+PRODUCTVERSION @VERSION_COMMAS@
+FILEOS 0x40004L
+FILETYPE 0x1L
+BEGIN
+  BLOCK "StringFileInfo"
+  BEGIN
+    BLOCK "040904B0"
+    BEGIN
+      VALUE "FileDescription", "Image Shrinker - bulk resize and compress"
+      VALUE "ProductName", "Image Shrinker"
+      VALUE "FileVersion", "@VERSION@.0"
+      VALUE "ProductVersion", "@VERSION@.0"
+      VALUE "OriginalFilename", "ImageShrinker.exe"
+    END
+  END
+  BLOCK "VarFileInfo"
+  BEGIN
+    VALUE "Translation", 0x409, 1200
+  END
+END
