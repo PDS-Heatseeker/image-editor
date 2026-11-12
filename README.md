@@ -21,7 +21,7 @@ The app isn't code-signed, so the first time Windows shows *"Windows protected y
 - **Format**: keep each image's own format, or convert all to JPG, JPEG, PNG, WebP, WebP lossless, TIFF or BMP. The quality slider (default 90) applies to JPG and WebP.
 - **Step 1 · Resize and compress**: makes the new versions without saving anything yet. Change the settings and run it again as often as you like. Each run starts from your **original** files, never from an earlier result.
 - **Preview**: double-click an image (or select it and click *Preview*). Once it's compressed you get a before/after view: drag the line to compare, scroll to zoom, and use ‹ › to step through the selected images.
-- **Step 2 · Save**: appears after compressing. Save **to a folder** (default) or **as a zip file**. If files with the same names are already in the folder (for example when saving back where the images came from), it asks whether to **replace** them, **keep both** (adds " (2)") or **skip** them, and warns you if any of them are your originals.
+- **Step 2 · Save**: appears after compressing. Save **to a folder** (default) or **as a zip file**. Saving to a folder uses Windows' own copy engine, so you get File Explorer's normal progress window and, if files with the same names are already there (for example when saving back where the images came from), Explorer's usual *Replace or Skip Files* dialog.
 - Photos are rotated upright, camera metadata is removed, wide-gamut colour profiles are kept, and re-saving never makes an image larger.
 - **Light on resources**: one image in memory at a time, low-priority background threads, and results kept in a temporary folder that's removed when you close the app.
 
@@ -62,6 +62,7 @@ scripts/build.sh 1.3.0           # -> out/ImageShrinker.exe
 | `src/core.c` | Decode → resize → encode pipeline, size estimates, preview decoding |
 | `src/update.c` | Self-update from GitHub Releases |
 | `src/preview.c` | Preview window with before/after comparison |
+| `src/shellcopy.c` | Saving to a folder through Windows' copy engine (Explorer's dialogs) |
 | `src/zipw.c` | Zip writer |
 | `src/test_cli.c`, `src/test_est.c` | Command-line test tools for the pipeline |
 

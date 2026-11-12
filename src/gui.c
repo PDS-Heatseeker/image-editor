@@ -32,6 +32,7 @@
 #include "zipw.h"
 #include "update.h"
 #include "preview.h"
+#include "shellcopy.h"
 
 #ifndef APP_VERSION
 #define APP_VERSION "1.3.0"
@@ -835,7 +836,7 @@ static int ext_fits(int fmt, const wchar_t *ext)
 
 static int write_whole(const wchar_t *path, const void *d, size_t n)
 {
-    HANDLE h = CreateFileW(path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_TEMPORARY, NULL);
+    HANDLE h = CreateFileW(path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
     DWORD w = 0;
     int ok;
     if (h == INVALID_HANDLE_VALUE) return 0;
@@ -1317,6 +1318,59 @@ static int same_path(const wchar_t *a, const wchar_t *b)
     return _wcsicmp(fa, fb) == 0;
 }
 
+static void job_done(JobResult *r);
+
+/* Folder saves go through Windows' own copy engine: Explorer's progress window and its
+ * "Replace or Skip Files" dialog. Returns 0 if that isn't available, so the caller copies itself. */
+static int save_with_explorer(Job *job)
+{
+    ShellCopyResult sr;
+    JobResult *r;
+    char *existed;
+    int i, ok;
+
+    existed = (char *)calloc((size_t)(job->n ? job->n : 1), 1);
+    if (!existed) return 0;
+    for (i = 0; i < job->n; i++) {
+        wchar_t target[1400];
+        swprintf(target, 1400, L"%ls\\%ls", job->dest, job->names[i]);
+        existed[i] = GetFileAttributesW(target) != INVALID_FILE_ATTRIBUTES;
+    }
+    set_running(1);
+    EnableWindow(g_go, FALSE);
+    set_status(L"Saving\x2026");
+    ok = shell_copy(g_wnd, job->files, job->names, job->n, job->dest, &sr);
+    if (!ok) { set_running(0); set_status(L""); free(existed); shell_copy_free(&sr, job->n); return 0; }
+
+    r = (JobResult *)calloc(1, sizeof *r);
+    free(g_repl_ids);
+    g_repl_ids = (int *)malloc((size_t)(job->n ? job->n : 1) * sizeof *g_repl_ids);
+    g_nrepl = 0;
+    if (r) {
+        r->kind = 1;
+        r->ok = sr.copied;
+        r->skipped = sr.skipped;
+        r->failed = sr.failed;
+        r->out_bytes = sr.bytes;
+        r->cancelled = sr.aborted && sr.copied == 0;
+        wcsncpy(r->dest, job->dest, 1023);
+    }
+    for (i = 0; i < job->n; i++) {                /* which existing files were replaced? */
+        wchar_t target[1400];
+        int fi;
+        swprintf(target, 1400, L"%ls\\%ls", job->dest, job->names[i]);
+        if (!sr.written[i] || !existed[i] || !same_path(sr.written[i], target)) continue;
+        if (r) r->replaced++;
+        fi = find_item(job->ids[i]);
+        if (fi >= 0 && g_repl_ids && same_path(g_items[fi]->path, target)) g_repl_ids[g_nrepl++] = job->ids[i];
+    }
+    shell_copy_free(&sr, job->n);
+    free(existed);
+    job_free(job);
+    job_done(r);
+    return 1;
+}
+
 static void start_save(void)
 {
     Job *job;
@@ -1390,6 +1444,9 @@ static void start_save(void)
     job->hwnd = g_wnd;
     wcsncpy(job->dest, dest, 1023);
 
+    if (!zip && !g_auto && save_with_explorer(job)) return;
+
+    /* fallback (and test runs): copy ourselves, asking first if names are taken */
     free(g_repl_ids);
     g_repl_ids = NULL;
     g_nrepl = 0;
@@ -1554,13 +1611,14 @@ static void job_done(JobResult *r)
             }
             if (r->skipped) {
                 l = wcslen(msg);
-                swprintf(msg + l, 4000 - l, L"\n%d image%ls skipped because %ls already there.\n", r->skipped,
+                swprintf(msg + l, 4000 - l, L"\n%d image%ls skipped because %ls already taken.\n", r->skipped,
                          r->skipped == 1 ? L" was" : L"s were", r->skipped == 1 ? L"its name was" : L"their names were");
             }
             if (r->fatalmsg[0]) { l = wcslen(msg); swprintf(msg + l, 4000 - l, L"\n%ls\n", r->fatalmsg); }
             if (r->failed) {
                 l = wcslen(msg);
-                swprintf(msg + l, 4000 - l, L"\n%d file%ls skipped:\n%ls", r->failed, r->failed == 1 ? L" was" : L"s were", r->errors);
+                if (r->errors[0]) swprintf(msg + l, 4000 - l, L"\n%d file%ls skipped:\n%ls", r->failed, r->failed == 1 ? L" was" : L"s were", r->errors);
+                else swprintf(msg + l, 4000 - l, L"\n%d file%ls couldn\x2019t be saved.\n", r->failed, r->failed == 1 ? L"" : L"s");
             }
             l = wcslen(msg);
             swprintf(msg + l, 4000 - l, r->kind == 2 ? L"\nShow the zip in its folder?" : L"\nOpen the folder?");

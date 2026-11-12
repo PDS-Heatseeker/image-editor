@@ -43,7 +43,7 @@ rm -f "$ROOT/out/ImageShrinker.exe"
 INC="-I$JCFG -I$D/mozjpeg -I$D/libwebp/src -I$D/stb -I$D/stb_image_resize -I$D/lodepng"
 $CC -O2 -Wall -Wextra -Wno-unused-function -Wno-unused-parameter -ffunction-sections -fdata-sections $INC \
   -DAPP_VERSION="\"$VERSION\"" -municode \
-  "$S/gui.c" "$S/core.c" "$S/zipw.c" "$S/update.c" "$S/preview.c" "$B/app.res" "$B/libcodecs.a" \
+  "$S/gui.c" "$S/core.c" "$S/zipw.c" "$S/update.c" "$S/preview.c" "$S/shellcopy.c" "$B/app.res" "$B/libcodecs.a" \
   -lcomctl32 -luuid -lwinhttp -lcomdlg32 -lshell32 -lole32 -luser32 -lgdi32 \
   -Wl,--subsystem,windows -Wl,--gc-sections -s -o "$ROOT/out/ImageShrinker.exe" 2>&1 | { grep -v "deps/" || true; }
 test -s "$ROOT/out/ImageShrinker.exe"
